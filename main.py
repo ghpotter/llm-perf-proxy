@@ -13,6 +13,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+import aiosqlite
 import httpx
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import StreamingResponse
@@ -23,6 +24,7 @@ from fastapi.responses import StreamingResponse
 
 OLLAMA_BASE_URL = "http://localhost:11434"
 METRICS_QUEUE_MAX_SIZE = 1000  # back-pressure limit
+DB_PATH = "metrics.db"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,11 +33,47 @@ logging.basicConfig(
 log = logging.getLogger("llm-proxy")
 
 # ---------------------------------------------------------------------------
-# In-memory metrics store
-# TODO: replace with SQLite/Postgres in a later phase
+# Database — shared async connection (opened in lifespan)
 # ---------------------------------------------------------------------------
 
-metrics_store: list[dict] = []
+db: aiosqlite.Connection | None = None
+
+
+async def _init_db(conn: aiosqlite.Connection) -> None:
+    """
+    Idempotent schema migration — safe to run on every startup.
+    CREATE TABLE IF NOT EXISTS means existing data is never touched.
+
+    All Ollama durations are stored in nanoseconds (raw from the API) so
+    no precision is lost; the summary endpoint converts to ms on read.
+    """
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS requests (
+            id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp           TEXT    NOT NULL,
+            endpoint            TEXT    NOT NULL,
+            model               TEXT    NOT NULL,
+            wall_duration_ns    INTEGER,
+            total_duration      INTEGER,
+            load_duration       INTEGER,
+            prompt_eval_count   INTEGER,
+            prompt_eval_duration INTEGER,
+            eval_count          INTEGER,
+            eval_duration       INTEGER
+        )
+    """)
+    # Index for the most common query patterns
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requests_model    ON requests (model)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requests_endpoint ON requests (endpoint)"
+    )
+    await conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_requests_timestamp ON requests (timestamp)"
+    )
+    await conn.commit()
+    log.info("Database ready at %s", DB_PATH)
 
 
 # ---------------------------------------------------------------------------
@@ -55,39 +93,57 @@ async def metrics_worker():
     while True:
         record = await metrics_queue.get()
         try:
-            _persist_metrics(record)
+            await _persist_metrics(record)
         except Exception as exc:
             log.error("Failed to persist metrics record: %s", exc)
         finally:
             metrics_queue.task_done()
 
 
-def _persist_metrics(record: dict):
+async def _persist_metrics(record: dict) -> None:
     """
-    Persist a single metrics record.
-    Currently appends to an in-memory list and logs a summary line.
-    TODO: swap this for an async SQLite / ClickHouse write.
+    Write a single metrics record to SQLite via the shared connection.
+    Uses a parameterised INSERT — no string formatting, no injection risk.
+    The log line is retained so live tail (``uvicorn`` stdout) still works
+    as a lightweight real-time monitor without opening the DB.
     """
-    metrics_store.append(record)
-
-    eval_count = record.get("eval_count", 0)
-    eval_duration_ns = record.get("eval_duration", 0)
-    total_duration_ms = record.get("total_duration", 0) / 1_000_000
-
-    tps = (
-        eval_count / (eval_duration_ns / 1_000_000_000)
-        if eval_duration_ns > 0
-        else 0.0
+    await db.execute(
+        """
+        INSERT INTO requests (
+            timestamp, endpoint, model,
+            wall_duration_ns, total_duration, load_duration,
+            prompt_eval_count, prompt_eval_duration,
+            eval_count, eval_duration
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            record.get("timestamp"),
+            record.get("endpoint"),
+            record.get("model"),
+            record.get("wall_duration_ns"),
+            record.get("total_duration"),
+            record.get("load_duration"),
+            record.get("prompt_eval_count"),
+            record.get("prompt_eval_duration"),
+            record.get("eval_count"),
+            record.get("eval_duration"),
+        ),
     )
+    await db.commit()
+
+    eval_count       = record.get("eval_count") or 0
+    eval_duration_ns = record.get("eval_duration") or 0
+    tps = eval_count / (eval_duration_ns / 1_000_000_000) if eval_duration_ns > 0 else 0.0
 
     log.info(
-        "METRICS | model=%-20s tokens=%4d  tps=%6.1f  total_ms=%7.1f  "
-        "prompt_ms=%6.1f  gen_ms=%6.1f",
+        "METRICS | endpoint=%-8s  model=%-20s  tokens=%4d  tps=%6.1f  "
+        "total_ms=%7.1f  prompt_ms=%6.1f  gen_ms=%6.1f",
+        record.get("endpoint", "?"),
         record.get("model", "unknown"),
         eval_count,
         tps,
-        total_duration_ms,
-        record.get("prompt_eval_duration", 0) / 1_000_000,
+        (record.get("total_duration") or 0) / 1_000_000,
+        (record.get("prompt_eval_duration") or 0) / 1_000_000,
         eval_duration_ns / 1_000_000,
     )
 
@@ -98,15 +154,26 @@ def _persist_metrics(record: dict):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global db
+    db = await aiosqlite.connect(DB_PATH)
+    # Return rows as dict-like objects so column names are accessible by name
+    db.row_factory = aiosqlite.Row
+    await _init_db(db)
+
     worker_task = asyncio.create_task(metrics_worker())
     log.info("Proxy ready. Forwarding to %s", OLLAMA_BASE_URL)
     yield
+
     worker_task.cancel()
     try:
         await worker_task
     except asyncio.CancelledError:
         pass
-    log.info("Metrics worker stopped.")
+
+    # Flush any records still in the queue before closing
+    await metrics_queue.join()
+    await db.close()
+    log.info("Database closed. Metrics worker stopped.")
 
 
 app = FastAPI(
@@ -202,11 +269,15 @@ async def health():
     except Exception:
         ollama_ok = False
 
+    async with db.execute("SELECT COUNT(*) FROM requests") as cursor:
+        row = await cursor.fetchone()
+        stored_records = row[0] if row else 0
+
     return {
         "proxy": "ok",
         "ollama": "ok" if ollama_ok else "unreachable",
         "queued_metrics": metrics_queue.qsize(),
-        "stored_records": len(metrics_store),
+        "stored_records": stored_records,
     }
 
 
@@ -269,50 +340,59 @@ async def proxy_generate(request: Request):
 @app.get("/metrics/summary")
 async def metrics_summary():
     """
-    Returns aggregated performance stats across all captured requests,
-    broken down by endpoint (chat vs generate) and rolled up globally.
-    TODO: replace with time-windowed SQL queries.
+    Aggregated performance stats backed by SQL — survives restarts.
+
+    All heavy aggregation is pushed into SQLite so Python only handles
+    serialisation. Two queries: one global roll-up, one per-endpoint GROUP BY.
     """
-    if not metrics_store:
-        return {"message": "No metrics captured yet.", "total_requests": 0}
+    GLOBAL_SQL = """
+        SELECT
+            COUNT(*)                                        AS total_requests,
+            SUM(eval_count)                                 AS total_tokens,
+            AVG(CAST(eval_count AS REAL)
+                / (eval_duration / 1e9))                    AS avg_tps,
+            MAX(CAST(eval_count AS REAL)
+                / (eval_duration / 1e9))                    AS peak_tps,
+            AVG(total_duration    / 1e6)                    AS avg_total_ms,
+            AVG(prompt_eval_duration / 1e6)                 AS avg_prompt_ms
+        FROM requests
+        WHERE eval_duration > 0 AND eval_count > 0
+    """
+    PER_ENDPOINT_SQL = """
+        SELECT
+            endpoint,
+            COUNT(*)                                        AS requests,
+            SUM(eval_count)                                 AS total_tokens,
+            AVG(CAST(eval_count AS REAL)
+                / (eval_duration / 1e9))                    AS avg_tps,
+            MAX(CAST(eval_count AS REAL)
+                / (eval_duration / 1e9))                    AS peak_tps,
+            AVG(total_duration    / 1e6)                    AS avg_total_ms,
+            AVG(prompt_eval_duration / 1e6)                 AS avg_prompt_ms
+        FROM requests
+        WHERE eval_duration > 0 AND eval_count > 0
+        GROUP BY endpoint
+    """
 
-    def avg(values):
-        return sum(values) / len(values) if values else 0.0
-
-    def _aggregate(records: list[dict]) -> dict:
-        valid = [
-            r for r in records
-            if r.get("eval_duration") and r.get("eval_count")
-        ]
-        if not valid:
-            return {"requests": len(records), "requests_with_metrics": 0}
-
-        tps_list = [
-            r["eval_count"] / (r["eval_duration"] / 1_000_000_000) for r in valid
-        ]
+    def _round_row(row) -> dict:
         return {
-            "requests": len(records),
-            "requests_with_metrics": len(valid),
-            "avg_tokens_per_second": round(avg(tps_list), 2),
-            "peak_tokens_per_second": round(max(tps_list), 2),
-            "avg_total_latency_ms": round(
-                avg([r["total_duration"] / 1_000_000 for r in valid if r.get("total_duration")]), 2
-            ),
-            "avg_prompt_eval_ms": round(
-                avg([r["prompt_eval_duration"] / 1_000_000 for r in valid if r.get("prompt_eval_duration")]), 2
-            ),
-            "total_tokens_generated": sum(r.get("eval_count", 0) for r in records),
+            k: round(v, 2) if isinstance(v, float) else v
+            for k, v in dict(row).items()
         }
 
-    # TODO: replace with time-windowed SQL queries.
-    chat_records     = [r for r in metrics_store if r.get("endpoint") == "chat"]
-    generate_records = [r for r in metrics_store if r.get("endpoint") == "generate"]
+    async with db.execute(GLOBAL_SQL) as cur:
+        global_row = await cur.fetchone()
+
+    if not global_row or global_row["total_requests"] == 0:
+        return {"message": "No metrics captured yet.", "total_requests": 0}
+
+    async with db.execute(PER_ENDPOINT_SQL) as cur:
+        endpoint_rows = await cur.fetchall()
 
     return {
-        "overall":   _aggregate(metrics_store),
+        "overall": _round_row(global_row),
         "by_endpoint": {
-            "chat":     _aggregate(chat_records)     if chat_records     else None,
-            "generate": _aggregate(generate_records) if generate_records else None,
+            row["endpoint"]: _round_row(row) for row in endpoint_rows
         },
         "queue_depth": metrics_queue.qsize(),
     }
