@@ -32,7 +32,7 @@ log = logging.getLogger("llm-proxy")
 
 # ---------------------------------------------------------------------------
 # In-memory metrics store
-# TODO: Replace with SQLite/Postgres later
+# TODO: replace with SQLite/Postgres in a later phase
 # ---------------------------------------------------------------------------
 
 metrics_store: list[dict] = []
@@ -118,6 +118,77 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------------------------
+# Shared streaming helper
+# ---------------------------------------------------------------------------
+
+async def _proxy_stream(ollama_path: str, body: dict, endpoint: str):
+    """
+    Generic async generator that:
+      - Opens a streaming POST to ``ollama_path`` with ``body``.
+      - Yields every raw NDJSON line back to the caller immediately.
+      - On the terminal chunk (done=True) builds a metrics record tagged
+        with ``endpoint`` and enqueues it for async persistence.
+
+    Both /api/chat and /api/generate share this path — they differ only
+    in which Ollama URL they target and which content field carries text,
+    but the metrics fields on the final chunk are identical for both.
+    """
+    model = body.get("model", "unknown")
+    wall_start = time.monotonic()
+
+    async with httpx.AsyncClient(timeout=None) as client:
+        async with client.stream(
+            "POST",
+            f"{OLLAMA_BASE_URL}{ollama_path}",
+            json=body,
+            headers={"Content-Type": "application/json"},
+        ) as ollama_response:
+
+            if ollama_response.status_code != 200:
+                error_body = await ollama_response.aread()
+                yield error_body
+                return
+
+            async for raw_line in ollama_response.aiter_lines():
+                if not raw_line:
+                    continue
+
+                # Yield raw bytes to client before doing any parsing
+                yield (raw_line + "\n").encode()
+
+                try:
+                    chunk = json.loads(raw_line)
+                except json.JSONDecodeError:
+                    continue
+
+                if chunk.get("done") is True:
+                    wall_elapsed_ns = int(
+                        (time.monotonic() - wall_start) * 1_000_000_000
+                    )
+                    record = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "endpoint": endpoint,   # "chat" | "generate"
+                        "model": model,
+                        "wall_duration_ns": wall_elapsed_ns,
+                        # Ollama native perf fields (nanoseconds)
+                        "total_duration": chunk.get("total_duration"),
+                        "load_duration": chunk.get("load_duration"),
+                        "prompt_eval_duration": chunk.get("prompt_eval_duration"),
+                        "prompt_eval_count": chunk.get("prompt_eval_count"),
+                        "eval_duration": chunk.get("eval_duration"),
+                        "eval_count": chunk.get("eval_count"),
+                    }
+                    try:
+                        metrics_queue.put_nowait(record)
+                    except asyncio.QueueFull:
+                        log.warning(
+                            "Metrics queue full — dropping record "
+                            "[endpoint=%s model=%s]",
+                            endpoint, model,
+                        )
+
+
+# ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
 
@@ -144,74 +215,53 @@ async def proxy_chat(request: Request):
     """
     Streaming proxy for Ollama's /api/chat endpoint.
 
-    Flow:
-      1. Read & validate the incoming JSON body.
-      2. Force stream=True so Ollama sends newline-delimited JSON chunks.
-      3. Open a persistent httpx stream to Ollama.
-      4. Yield each raw chunk back to the client immediately (zero buffering).
-      5. On the final chunk (done=True), extract perf fields and enqueue them
-         for async persistence — never blocking the response path.
+    Expects the standard Ollama chat body:
+        { "model": "phi3", "messages": [{"role": "user", "content": "..."}] }
+
+    Streams NDJSON chunks back to the client. Each intermediate chunk carries
+    a ``message.content`` delta; the final chunk (done=True) carries perf
+    metrics which are captured asynchronously without blocking the stream.
     """
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body.")
 
-    # Always request streaming from Ollama regardless of what client sent
-    body["stream"] = True
-    model = body.get("model", "unknown")
-    wall_start = time.monotonic()
-
-    async def stream_and_capture():
-        async with httpx.AsyncClient(timeout=None) as client:
-            async with client.stream(
-                "POST",
-                f"{OLLAMA_BASE_URL}/api/chat",
-                json=body,
-                headers={"Content-Type": "application/json"},
-            ) as ollama_response:
-
-                if ollama_response.status_code != 200:
-                    error_body = await ollama_response.aread()
-                    yield error_body
-                    return
-
-                async for raw_line in ollama_response.aiter_lines():
-                    if not raw_line:
-                        continue
-
-                    # Yield raw bytes to client immediately
-                    yield (raw_line + "\n").encode()
-
-                    # Parse only to check for the terminal metrics chunk
-                    try:
-                        chunk = json.loads(raw_line)
-                    except json.JSONDecodeError:
-                        continue
-
-                    if chunk.get("done") is True:
-                        wall_elapsed_ns = int(
-                            (time.monotonic() - wall_start) * 1_000_000_000
-                        )
-                        record = {
-                            "timestamp": datetime.now(timezone.utc).isoformat(),
-                            "model": model,
-                            "wall_duration_ns": wall_elapsed_ns,
-                            # Ollama native perf fields
-                            "total_duration": chunk.get("total_duration"),
-                            "prompt_eval_duration": chunk.get("prompt_eval_duration"),
-                            "eval_duration": chunk.get("eval_duration"),
-                            "eval_count": chunk.get("eval_count"),
-                            "prompt_eval_count": chunk.get("prompt_eval_count"),
-                        }
-                        # Non-blocking enqueue — drop if queue is full under load
-                        try:
-                            metrics_queue.put_nowait(record)
-                        except asyncio.QueueFull:
-                            log.warning("Metrics queue full — dropping record for model %s", model)
+    body["stream"] = True  # enforce streaming regardless of client preference
 
     return StreamingResponse(
-        stream_and_capture(),
+        _proxy_stream("/api/chat", body, endpoint="chat"),
+        media_type="application/x-ndjson",
+    )
+
+
+@app.post("/api/generate")
+async def proxy_generate(request: Request):
+    """
+    Streaming proxy for Ollama's /api/generate endpoint.
+
+    Expects the standard Ollama generate body:
+        { "model": "phi3", "prompt": "Why is the sky blue?" }
+
+    Identical proxy mechanics to /api/chat. Intermediate chunks carry a
+    ``response`` string field (raw text delta); the final chunk (done=True)
+    carries the same perf metrics schema and is captured asynchronously.
+
+    Key schema differences vs /api/chat:
+        /api/chat   → chunk["message"]["content"]  (delta per chunk)
+        /api/generate → chunk["response"]          (delta per chunk)
+    The proxy is transparent to both — it streams raw bytes without
+    inspecting the content field, so either schema passes through untouched.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.")
+
+    body["stream"] = True  # enforce streaming regardless of client preference
+
+    return StreamingResponse(
+        _proxy_stream("/api/generate", body, endpoint="generate"),
         media_type="application/x-ndjson",
     )
 
@@ -219,37 +269,50 @@ async def proxy_chat(request: Request):
 @app.get("/metrics/summary")
 async def metrics_summary():
     """
-    Returns aggregated performance stats across all captured requests.
+    Returns aggregated performance stats across all captured requests,
+    broken down by endpoint (chat vs generate) and rolled up globally.
     TODO: replace with time-windowed SQL queries.
     """
     if not metrics_store:
         return {"message": "No metrics captured yet.", "total_requests": 0}
 
-    valid = [
-        r for r in metrics_store
-        if r.get("eval_duration") and r.get("eval_count")
-    ]
-
     def avg(values):
         return sum(values) / len(values) if values else 0.0
 
-    tps_list = [
-        r["eval_count"] / (r["eval_duration"] / 1_000_000_000) for r in valid
-    ]
-    total_ms_list = [
-        r["total_duration"] / 1_000_000 for r in valid if r.get("total_duration")
-    ]
-    prompt_ms_list = [
-        r["prompt_eval_duration"] / 1_000_000
-        for r in valid if r.get("prompt_eval_duration")
-    ]
+    def _aggregate(records: list[dict]) -> dict:
+        valid = [
+            r for r in records
+            if r.get("eval_duration") and r.get("eval_count")
+        ]
+        if not valid:
+            return {"requests": len(records), "requests_with_metrics": 0}
+
+        tps_list = [
+            r["eval_count"] / (r["eval_duration"] / 1_000_000_000) for r in valid
+        ]
+        return {
+            "requests": len(records),
+            "requests_with_metrics": len(valid),
+            "avg_tokens_per_second": round(avg(tps_list), 2),
+            "peak_tokens_per_second": round(max(tps_list), 2),
+            "avg_total_latency_ms": round(
+                avg([r["total_duration"] / 1_000_000 for r in valid if r.get("total_duration")]), 2
+            ),
+            "avg_prompt_eval_ms": round(
+                avg([r["prompt_eval_duration"] / 1_000_000 for r in valid if r.get("prompt_eval_duration")]), 2
+            ),
+            "total_tokens_generated": sum(r.get("eval_count", 0) for r in records),
+        }
+
+    # TODO: replace with time-windowed SQL queries.
+    chat_records     = [r for r in metrics_store if r.get("endpoint") == "chat"]
+    generate_records = [r for r in metrics_store if r.get("endpoint") == "generate"]
 
     return {
-        "total_requests": len(metrics_store),
-        "requests_with_metrics": len(valid),
-        "avg_tokens_per_second": round(avg(tps_list), 2),
-        "avg_total_latency_ms": round(avg(total_ms_list), 2),
-        "avg_prompt_eval_ms": round(avg(prompt_ms_list), 2),
-        "peak_tokens_per_second": round(max(tps_list), 2) if tps_list else 0,
-        "total_tokens_generated": sum(r.get("eval_count", 0) for r in metrics_store),
+        "overall":   _aggregate(metrics_store),
+        "by_endpoint": {
+            "chat":     _aggregate(chat_records)     if chat_records     else None,
+            "generate": _aggregate(generate_records) if generate_records else None,
+        },
+        "queue_depth": metrics_queue.qsize(),
     }
