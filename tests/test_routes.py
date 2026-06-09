@@ -6,6 +6,7 @@ These confirm that the app wires up correctly and routes return the right shapes
 without needing a live LLM or network.
 """
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiosqlite
@@ -13,6 +14,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 import llm_perf_proxy.db as db
+import llm_perf_proxy.worker as worker
 from llm_perf_proxy import main
 from llm_perf_proxy.backends.base import MetricsRecord
 from llm_perf_proxy.backends.ollama import OllamaBackend

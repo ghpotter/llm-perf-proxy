@@ -11,8 +11,8 @@ from datetime import UTC, datetime
 
 import httpx
 
-from src.llm_perf_proxy.backends.base import Backend, MetricsRecord
-from src.llm_perf_proxy.config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
+from llm_perf_proxy.backends.base import Backend, MetricsRecord
+from llm_perf_proxy.config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
 
 
 class AnthropicBackend(Backend):

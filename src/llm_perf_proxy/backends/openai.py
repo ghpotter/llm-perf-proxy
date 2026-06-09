@@ -12,8 +12,8 @@ from datetime import UTC, datetime
 
 import httpx
 
-from src.llm_perf_proxy.backends.base import Backend, MetricsRecord
-from src.llm_perf_proxy.config import OPENAI_API_KEY, OPENAI_BASE_URL
+from llm_perf_proxy.backends.base import Backend, MetricsRecord
+from llm_perf_proxy.config import OPENAI_API_KEY, OPENAI_BASE_URL
 
 
 class OpenAIBackend(Backend):
