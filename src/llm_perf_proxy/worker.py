@@ -12,9 +12,9 @@ client's stream is never affected.
 import asyncio
 import logging
 
-import db
-from backends.base import MetricsRecord
-from config import METRICS_QUEUE_MAX_SIZE
+import llm_perf_proxy.db as db
+from llm_perf_proxy.backends.base import MetricsRecord
+from llm_perf_proxy.config import METRICS_QUEUE_MAX_SIZE
 
 log = logging.getLogger("llm-proxy.worker")
 
@@ -59,12 +59,12 @@ async def run() -> None:
 def _log_record(record: MetricsRecord) -> None:
     """Emit a structured one-liner to stdout for live tail monitoring."""
     eval_count = record.get("eval_count") or 0
-    wall_ns    = record.get("wall_duration_ns") or 0
-    ttft_ns    = record.get("ttft_ns")
+    wall_ns = record.get("wall_duration_ns") or 0
+    ttft_ns = record.get("ttft_ns")
     # Use Ollama's native gen duration when available; fall back to wall clock
-    gen_ns     = record.get("eval_duration") or wall_ns
-    tps        = eval_count / (gen_ns / 1e9) if gen_ns > 0 else 0.0
-    ttft_ms    = f"{ttft_ns / 1e6:.1f}" if ttft_ns is not None else "n/a"
+    gen_ns = record.get("eval_duration") or wall_ns
+    tps = eval_count / (gen_ns / 1e9) if gen_ns > 0 else 0.0
+    ttft_ms = f"{ttft_ns / 1e6:.1f}" if ttft_ns is not None else "n/a"
 
     log.info(
         "METRICS | backend=%-9s  endpoint=%-8s  model=%-24s  "

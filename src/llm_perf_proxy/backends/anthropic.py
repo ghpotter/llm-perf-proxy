@@ -6,13 +6,13 @@ Streams from the Anthropic Messages API using its SSE event/data format.
 
 import json
 import time
-from datetime import datetime, timezone
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import httpx
 
-from backends.base import Backend, MetricsRecord
-from config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
+from llm_perf_proxy.backends.base import Backend, MetricsRecord
+from llm_perf_proxy.config import ANTHROPIC_API_KEY, ANTHROPIC_BASE_URL
 
 
 class AnthropicBackend(Backend):
@@ -44,7 +44,7 @@ class AnthropicBackend(Backend):
     def __init__(self):
         if not ANTHROPIC_API_KEY:
             raise RuntimeError("ANTHROPIC_API_KEY is not set.")
-        self.api_key  = ANTHROPIC_API_KEY
+        self.api_key = ANTHROPIC_API_KEY
         self.base_url = ANTHROPIC_BASE_URL
 
     async def stream(
@@ -111,7 +111,7 @@ class AnthropicBackend(Backend):
 
         wall_ns = int((time.monotonic() - wall_start) * 1e9)
         yield MetricsRecord(
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             backend="anthropic",
             endpoint=endpoint,
             model=model,

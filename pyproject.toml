@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-perf-proxy"
+version = "0.2.0"
+description = "Zero-overhead async observability proxy for local and remote LLM inference"
+requires-python = ">=3.12"
+dependencies = [
+    "aiosqlite==0.22.1",
+    "fastapi==0.136.3",
+    "httpx==0.28.1",
+    "python-dotenv==1.2.2",
+    "uvicorn==0.49.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.5",
+    "pytest-asyncio==0.25.3",
+    "ruff==0.11.12",
+    "mypy==1.16.0",
+]
+
+[project.scripts]
+# After `pip install -e .`, run the proxy with: llm-perf-proxy
+llm-perf-proxy = "llm_perf_proxy.main:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["F401"]
+
+[tool.mypy]
+ignore_missing_imports = true
+no_strict_optional = true

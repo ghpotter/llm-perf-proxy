@@ -15,13 +15,13 @@ import logging
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-import db
-import worker
-from backends import MetricsRecord, OllamaBackend, build_backend
-from backends.base import Backend
+import llm_perf_proxy.db as db
+import llm_perf_proxy.worker as worker
+from llm_perf_proxy.backends import MetricsRecord, OllamaBackend, build_backend
+from llm_perf_proxy.backends.base import Backend
 
 log = logging.getLogger("llm-proxy")
 
@@ -32,6 +32,7 @@ active_backend: Backend | None = None
 # ---------------------------------------------------------------------------
 # Lifespan
 # ---------------------------------------------------------------------------
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -66,6 +67,7 @@ app = FastAPI(
 # Streaming helper
 # ---------------------------------------------------------------------------
 
+
 async def _proxy_stream(endpoint: str, body: dict, request_headers: dict):
     """
     Delegates to the active backend's stream() generator.
@@ -82,6 +84,7 @@ async def _proxy_stream(endpoint: str, body: dict, request_headers: dict):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
 
 @app.get("/health")
 async def health():
@@ -180,17 +183,24 @@ async def metrics_summary():
     _WHERE = "WHERE eval_count > 0 AND COALESCE(eval_duration, wall_duration_ns) > 0"
 
     queries = {
-        "by_backend":  (f"SELECT backend,  {_METRICS_COLS} FROM requests {_WHERE} GROUP BY backend  ORDER BY backend",  "backend"),
-        "by_endpoint": (f"SELECT endpoint, {_METRICS_COLS} FROM requests {_WHERE} GROUP BY endpoint ORDER BY endpoint", "endpoint"),
-        "by_model":    (f"SELECT model,    {_METRICS_COLS} FROM requests {_WHERE} GROUP BY model    ORDER BY avg_tps DESC", "model"),
+        "by_backend": (
+            f"SELECT backend,  {_METRICS_COLS} FROM requests {_WHERE} GROUP BY backend  ORDER BY backend",
+            "backend",
+        ),
+        "by_endpoint": (
+            f"SELECT endpoint, {_METRICS_COLS} FROM requests {_WHERE} GROUP BY endpoint ORDER BY endpoint",
+            "endpoint",
+        ),
+        "by_model": (
+            f"SELECT model,    {_METRICS_COLS} FROM requests {_WHERE} GROUP BY model    ORDER BY avg_tps DESC",
+            "model",
+        ),
     }
 
     def _round_row(row) -> dict:
         return {k: round(v, 2) if isinstance(v, float) else v for k, v in dict(row).items()}
 
-    async with db.conn.execute(
-        f"SELECT {_METRICS_COLS} FROM requests {_WHERE}"
-    ) as cur:
+    async with db.conn.execute(f"SELECT {_METRICS_COLS} FROM requests {_WHERE}") as cur:
         global_row = await cur.fetchone()
 
     if not global_row or global_row["requests"] == 0:
