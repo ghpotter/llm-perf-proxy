@@ -165,3 +165,87 @@ async def test_generate_non_ollama_backend_returns_501(test_app, monkeypatch):
     assert resp.status_code == 501
     assert "openai" in resp.json()["detail"]
     assert "/api/chat" in resp.json()["detail"]
+
+
+# ── /metrics/timeseries ───────────────────────────────────────────────────────
+
+
+def _ts_record(timestamp, eval_count, eval_duration, backend="ollama", model="phi3"):
+    return MetricsRecord(
+        timestamp=timestamp,
+        backend=backend,
+        endpoint="chat",
+        model=model,
+        wall_duration_ns=5_000_000_000,
+        ttft_ns=None,
+        total_duration=None,
+        load_duration=None,
+        prompt_eval_count=10,
+        prompt_eval_duration=None,
+        eval_count=eval_count,
+        eval_duration=eval_duration,
+    )
+
+
+@pytest.mark.asyncio
+async def test_timeseries_hour_buckets(client):
+    # 2 records in hour 10, 1 in hour 11
+    for ts, ec, ed in [
+        ("2026-06-09T10:00:00Z", 100, 4_000_000_000),
+        ("2026-06-09T10:30:00Z", 80, 3_000_000_000),
+        ("2026-06-09T11:15:00Z", 120, 5_000_000_000),
+    ]:
+        await db.insert(_ts_record(ts, ec, ed))
+
+    resp = await client.get(
+        "/metrics/timeseries",
+        params={"since": "2026-06-09T00:00:00Z", "window": "hour"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["window"] == "hour"
+    assert len(body["buckets"]) == 2
+
+    bucket_10 = next(b for b in body["buckets"] if "T10:" in b["ts"])
+    assert bucket_10["requests"] == 2
+    assert bucket_10["total_tokens"] == 180
+
+
+@pytest.mark.asyncio
+async def test_timeseries_since_excludes_old_records(client):
+    await db.insert(_ts_record("2020-01-01T00:00:00Z", 100, 4_000_000_000))
+
+    resp = await client.get(
+        "/metrics/timeseries",
+        params={"since": "2025-01-01T00:00:00Z", "window": "day"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["buckets"] == []
+
+
+@pytest.mark.asyncio
+async def test_timeseries_backend_filter(client):
+    await db.insert(_ts_record("2026-06-09T10:00:00Z", 100, 4_000_000_000, backend="ollama"))
+    await db.insert(_ts_record("2026-06-09T10:00:00Z", 80, None, backend="openai", model="gpt-4o"))
+
+    resp = await client.get(
+        "/metrics/timeseries",
+        params={"since": "2026-06-09T00:00:00Z", "window": "hour", "backend": "ollama"},
+    )
+    assert resp.status_code == 200
+    buckets = resp.json()["buckets"]
+    assert len(buckets) == 1
+    assert buckets[0]["requests"] == 1
+
+
+@pytest.mark.asyncio
+async def test_timeseries_invalid_window_returns_400(client):
+    resp = await client.get("/metrics/timeseries", params={"window": "week"})
+    assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_timeseries_relative_since_accepted(client):
+    resp = await client.get("/metrics/timeseries", params={"since": "24h"})
+    assert resp.status_code == 200
+    assert "buckets" in resp.json()
