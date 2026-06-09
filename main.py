@@ -343,35 +343,48 @@ async def metrics_summary():
     Aggregated performance stats backed by SQL — survives restarts.
 
     All heavy aggregation is pushed into SQLite so Python only handles
-    serialisation. Two queries: one global roll-up, one per-endpoint GROUP BY.
+    serialisation. Four queries, each a GROUP BY slice of the same dataset:
+
+        overall          — single global roll-up row
+        by_endpoint      — GROUP BY endpoint   (chat vs generate)
+        by_model         — GROUP BY model       (phi3 vs phi4 vs …)
+        by_model_endpoint — GROUP BY model, endpoint  (cross-tab)
     """
-    GLOBAL_SQL = """
-        SELECT
-            COUNT(*)                                        AS total_requests,
-            SUM(eval_count)                                 AS total_tokens,
+    # Reusable SELECT expression block — identical across all four queries.
+    # Defining it once avoids drift if the metric list ever changes.
+    _METRICS_COLS = """
+            COUNT(*)                                         AS requests,
+            SUM(eval_count)                                  AS total_tokens,
             AVG(CAST(eval_count AS REAL)
-                / (eval_duration / 1e9))                    AS avg_tps,
+                / (eval_duration / 1e9))                     AS avg_tps,
             MAX(CAST(eval_count AS REAL)
-                / (eval_duration / 1e9))                    AS peak_tps,
-            AVG(total_duration    / 1e6)                    AS avg_total_ms,
-            AVG(prompt_eval_duration / 1e6)                 AS avg_prompt_ms
-        FROM requests
-        WHERE eval_duration > 0 AND eval_count > 0
+                / (eval_duration / 1e9))                     AS peak_tps,
+            AVG(total_duration       / 1e6)                  AS avg_total_ms,
+            AVG(prompt_eval_duration / 1e6)                  AS avg_prompt_ms
     """
-    PER_ENDPOINT_SQL = """
-        SELECT
-            endpoint,
-            COUNT(*)                                        AS requests,
-            SUM(eval_count)                                 AS total_tokens,
-            AVG(CAST(eval_count AS REAL)
-                / (eval_duration / 1e9))                    AS avg_tps,
-            MAX(CAST(eval_count AS REAL)
-                / (eval_duration / 1e9))                    AS peak_tps,
-            AVG(total_duration    / 1e6)                    AS avg_total_ms,
-            AVG(prompt_eval_duration / 1e6)                 AS avg_prompt_ms
-        FROM requests
-        WHERE eval_duration > 0 AND eval_count > 0
+    _WHERE = "WHERE eval_duration > 0 AND eval_count > 0"
+
+    GLOBAL_SQL = f"SELECT {_METRICS_COLS} FROM requests {_WHERE}"
+
+    PER_ENDPOINT_SQL = f"""
+        SELECT endpoint, {_METRICS_COLS}
+        FROM requests {_WHERE}
         GROUP BY endpoint
+        ORDER BY endpoint
+    """
+
+    PER_MODEL_SQL = f"""
+        SELECT model, {_METRICS_COLS}
+        FROM requests {_WHERE}
+        GROUP BY model
+        ORDER BY avg_tps DESC
+    """
+
+    PER_MODEL_ENDPOINT_SQL = f"""
+        SELECT model, endpoint, {_METRICS_COLS}
+        FROM requests {_WHERE}
+        GROUP BY model, endpoint
+        ORDER BY model, endpoint
     """
 
     def _round_row(row) -> dict:
@@ -383,16 +396,31 @@ async def metrics_summary():
     async with db.execute(GLOBAL_SQL) as cur:
         global_row = await cur.fetchone()
 
-    if not global_row or global_row["total_requests"] == 0:
+    if not global_row or global_row["requests"] == 0:
         return {"message": "No metrics captured yet.", "total_requests": 0}
 
     async with db.execute(PER_ENDPOINT_SQL) as cur:
         endpoint_rows = await cur.fetchall()
+
+    async with db.execute(PER_MODEL_SQL) as cur:
+        model_rows = await cur.fetchall()
+
+    async with db.execute(PER_MODEL_ENDPOINT_SQL) as cur:
+        model_endpoint_rows = await cur.fetchall()
+
+    # Build the cross-tab as { model: { endpoint: stats } }
+    cross_tab: dict = {}
+    for row in model_endpoint_rows:
+        cross_tab.setdefault(row["model"], {})[row["endpoint"]] = _round_row(row)
 
     return {
         "overall": _round_row(global_row),
         "by_endpoint": {
             row["endpoint"]: _round_row(row) for row in endpoint_rows
         },
+        "by_model": {
+            row["model"]: _round_row(row) for row in model_rows
+        },
+        "by_model_and_endpoint": cross_tab,
         "queue_depth": metrics_queue.qsize(),
     }
