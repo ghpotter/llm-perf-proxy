@@ -178,3 +178,58 @@ async def test_summary_sql_coalesce(test_db):
 
     # gpt-4o: 80 tokens / 2s = 40 t/s (wall-clock fallback)
     assert abs(rows["gpt-4o"] - 40.0) < 0.1
+
+
+@pytest.mark.asyncio
+async def test_insert_persists_cost(test_db):
+    record = MetricsRecord(
+        timestamp="2026-06-09T00:00:00Z",
+        backend="anthropic",
+        endpoint="chat",
+        model="claude-sonnet-4-6",
+        wall_duration_ns=3_000_000_000,
+        ttft_ns=400_000_000,
+        total_duration=None,
+        load_duration=None,
+        prompt_eval_count=100,
+        prompt_eval_duration=None,
+        eval_count=200,
+        eval_duration=None,
+        estimated_cost_usd=0.000900,  # (100*3 + 200*15) / 1M
+    )
+    await db.insert(record)
+
+    async with test_db.execute(
+        "SELECT estimated_cost_usd FROM requests WHERE backend='anthropic'"
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert abs(row["estimated_cost_usd"] - 0.000900) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_cost_null_for_unknown_model(test_db):
+    record = MetricsRecord(
+        timestamp="2026-06-09T00:01:00Z",
+        backend="ollama",
+        endpoint="chat",
+        model="phi3",
+        wall_duration_ns=5_000_000_000,
+        ttft_ns=None,
+        total_duration=None,
+        load_duration=None,
+        prompt_eval_count=18,
+        prompt_eval_duration=None,
+        eval_count=120,
+        eval_duration=4_600_000_000,
+    )
+    await db.insert(record)
+
+    async with test_db.execute(
+        "SELECT estimated_cost_usd FROM requests WHERE backend='ollama'"
+    ) as cur:
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert row["estimated_cost_usd"] is None
