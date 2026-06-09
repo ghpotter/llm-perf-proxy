@@ -1,79 +1,47 @@
 """
-worker.py — async metrics queue and background worker
-=======================================================
-Decouples the request/response path from database writes.
+backends/__init__.py
+====================
+Public surface of the backends package.
 
-The proxy enqueues a MetricsRecord with put_nowait() (non-blocking).
-The worker drains the queue in a separate asyncio Task, calling db.insert()
-and logging a summary line. Even if a write takes tens of milliseconds, the
-client's stream is never affected.
+Imports here define what ``from backends import …`` exposes, and keep
+main.py free of per-backend import lines. Adding a new backend means:
+  1. Create backends/newprovider.py with a class that extends Backend.
+  2. Import and register it in _build_backend() below.
+  3. Add its env vars to config.py and .env.example.
+Nothing else needs to change.
 """
 
-import asyncio
-import logging
-
-import src.llm_perf_proxy.db as db
-from src.llm_perf_proxy.backends.base import MetricsRecord
-from src.llm_perf_proxy.config import METRICS_QUEUE_MAX_SIZE
-
-log = logging.getLogger("llm-proxy.worker")
-
-queue: asyncio.Queue = asyncio.Queue(maxsize=METRICS_QUEUE_MAX_SIZE)
+from llm_perf_proxy.backends.anthropic import AnthropicBackend
+from llm_perf_proxy.backends.base import Backend, MetricsRecord
+from llm_perf_proxy.backends.ollama import OllamaBackend
+from llm_perf_proxy.backends.openai import OpenAIBackend
+from llm_perf_proxy.config import BACKEND
 
 
-def enqueue(record: MetricsRecord) -> None:
+def build_backend() -> Backend:
     """
-    Non-blocking enqueue. Drops the record and logs a warning if the queue
-    is full — preferable to blocking the response path under sustained load.
+    Instantiate and return the backend selected by the BACKEND env var.
+    Fails fast at startup with a clear message if the value is unrecognised
+    or a required API key is missing — better than a cryptic error mid-request.
     """
-    try:
-        queue.put_nowait(record)
-    except asyncio.QueueFull:
-        log.warning(
-            "Metrics queue full — dropping record [backend=%s model=%s]",
-            record.get("backend"),
-            record.get("model"),
-        )
+    match BACKEND:
+        case "ollama":
+            return OllamaBackend()
+        case "openai":
+            return OpenAIBackend()
+        case "anthropic":
+            return AnthropicBackend()
+        case _:
+            raise RuntimeError(
+                f"Unknown BACKEND '{BACKEND}'. Valid options: ollama, openai, anthropic."
+            )
 
 
-async def run() -> None:
-    """
-    Long-lived background task. Drain the queue indefinitely, persisting
-    each record and emitting a one-line log summary.
-
-    Started in app lifespan; cancelled (then flushed via queue.join()) on
-    shutdown so in-flight records are never silently dropped.
-    """
-    log.info("Metrics worker started.")
-    while True:
-        record: MetricsRecord = await queue.get()
-        try:
-            await db.insert(record)
-            _log_record(record)
-        except Exception as exc:
-            log.error("Failed to persist metrics record: %s", exc)
-        finally:
-            queue.task_done()
-
-
-def _log_record(record: MetricsRecord) -> None:
-    """Emit a structured one-liner to stdout for live tail monitoring."""
-    eval_count = record.get("eval_count") or 0
-    wall_ns = record.get("wall_duration_ns") or 0
-    ttft_ns = record.get("ttft_ns")
-    # Use Ollama's native gen duration when available; fall back to wall clock
-    gen_ns = record.get("eval_duration") or wall_ns
-    tps = eval_count / (gen_ns / 1e9) if gen_ns > 0 else 0.0
-    ttft_ms = f"{ttft_ns / 1e6:.1f}" if ttft_ns is not None else "n/a"
-
-    log.info(
-        "METRICS | backend=%-9s  endpoint=%-8s  model=%-24s  "
-        "tokens=%4d  tps=%6.1f  wall_ms=%7.1f  ttft_ms=%s",
-        record.get("backend", "?"),
-        record.get("endpoint", "?"),
-        record.get("model", "unknown"),
-        eval_count,
-        tps,
-        wall_ns / 1e6,
-        ttft_ms,
-    )
+__all__ = [
+    "Backend",
+    "MetricsRecord",
+    "OllamaBackend",
+    "OpenAIBackend",
+    "AnthropicBackend",
+    "build_backend",
+]
