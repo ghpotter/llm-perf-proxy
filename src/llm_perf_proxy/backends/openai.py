@@ -7,8 +7,8 @@ Override OPENAI_BASE_URL in .env to point at a different host.
 
 import json
 import time
-from datetime import datetime, timezone
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import httpx
 
@@ -39,7 +39,7 @@ class OpenAIBackend(Backend):
     def __init__(self):
         if not OPENAI_API_KEY:
             raise RuntimeError("OPENAI_API_KEY is not set.")
-        self.api_key  = OPENAI_API_KEY
+        self.api_key = OPENAI_API_KEY
         self.base_url = OPENAI_BASE_URL
 
     async def stream(
@@ -98,12 +98,12 @@ class OpenAIBackend(Backend):
 
                     # Usage arrives on the final content chunk
                     if chunk.get("usage"):
-                        prompt_tokens     = chunk["usage"].get("prompt_tokens")
+                        prompt_tokens = chunk["usage"].get("prompt_tokens")
                         completion_tokens = chunk["usage"].get("completion_tokens")
 
         wall_ns = int((time.monotonic() - wall_start) * 1e9)
         yield MetricsRecord(
-            timestamp=datetime.now(timezone.utc).isoformat(),
+            timestamp=datetime.now(UTC).isoformat(),
             backend="openai",
             endpoint=endpoint,
             model=model,

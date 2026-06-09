@@ -7,8 +7,8 @@ precision performance fields from the terminal chunk (done=True).
 
 import json
 import time
-from datetime import datetime, timezone
-from typing import AsyncIterator
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import httpx
 
@@ -69,7 +69,7 @@ class OllamaBackend(Backend):
                     if chunk.get("done") is True:
                         wall_ns = int((time.monotonic() - wall_start) * 1e9)
                         yield MetricsRecord(
-                            timestamp=datetime.now(timezone.utc).isoformat(),
+                            timestamp=datetime.now(UTC).isoformat(),
                             backend="ollama",
                             endpoint=endpoint,
                             model=model,

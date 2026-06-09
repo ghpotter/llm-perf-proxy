@@ -83,14 +83,12 @@ async def _migrate(c: aiosqlite.Connection) -> None:
             pass  # column already exists
 
     for idx, col in [
-        ("idx_requests_backend",   "backend"),
-        ("idx_requests_model",     "model"),
-        ("idx_requests_endpoint",  "endpoint"),
+        ("idx_requests_backend", "backend"),
+        ("idx_requests_model", "model"),
+        ("idx_requests_endpoint", "endpoint"),
         ("idx_requests_timestamp", "timestamp"),
     ]:
-        await c.execute(
-            f"CREATE INDEX IF NOT EXISTS {idx} ON requests ({col})"
-        )
+        await c.execute(f"CREATE INDEX IF NOT EXISTS {idx} ON requests ({col})")
 
     await c.commit()
 
