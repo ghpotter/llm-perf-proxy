@@ -12,8 +12,8 @@ import logging
 
 import aiosqlite
 
-from backends.base import MetricsRecord
-from config import DB_PATH
+from src.llm_perf_proxy.backends.base import MetricsRecord
+from src.llm_perf_proxy.config import DB_PATH
 
 log = logging.getLogger("llm-proxy.db")
 

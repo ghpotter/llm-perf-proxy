@@ -12,8 +12,8 @@ from typing import AsyncIterator
 
 import httpx
 
-from backends.base import Backend, MetricsRecord
-from config import OLLAMA_BASE_URL
+from src.llm_perf_proxy.backends.base import Backend, MetricsRecord
+from src.llm_perf_proxy.config import OLLAMA_BASE_URL
 
 
 def _ollama_path(endpoint: str) -> str:

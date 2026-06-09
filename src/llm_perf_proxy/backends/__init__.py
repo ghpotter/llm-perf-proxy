@@ -12,9 +12,9 @@ client's stream is never affected.
 import asyncio
 import logging
 
-import db
-from backends.base import MetricsRecord
-from config import METRICS_QUEUE_MAX_SIZE
+import src.llm_perf_proxy.db as db
+from src.llm_perf_proxy.backends.base import MetricsRecord
+from src.llm_perf_proxy.config import METRICS_QUEUE_MAX_SIZE
 
 log = logging.getLogger("llm-proxy.worker")
 
