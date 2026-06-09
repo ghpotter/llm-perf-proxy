@@ -127,6 +127,37 @@ async def test_metrics_summary_with_data(client, monkeypatch):
     assert "ollama" in body["by_backend"]
 
 
+@pytest.mark.asyncio
+async def test_metrics_summary_includes_cost_fields(client):
+    """Cost fields appear in summary when at least one record carries a price."""
+    await db.insert(
+        MetricsRecord(
+            timestamp="2026-06-09T00:00:00Z",
+            backend="anthropic",
+            endpoint="chat",
+            model="claude-sonnet-4-6",
+            wall_duration_ns=3_000_000_000,
+            ttft_ns=400_000_000,
+            total_duration=None,
+            load_duration=None,
+            prompt_eval_count=100,
+            prompt_eval_duration=None,
+            eval_count=200,
+            eval_duration=None,
+            estimated_cost_usd=0.000900,
+        )
+    )
+
+    resp = await client.get("/metrics/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert "total_cost_usd" in body["overall"]
+    assert "avg_cost_usd" in body["overall"]
+    assert body["overall"]["total_cost_usd"] is not None
+    assert abs(body["overall"]["total_cost_usd"] - 0.000900) < 1e-5
+
+
 # ── /api/chat ─────────────────────────────────────────────────────────────────
 
 

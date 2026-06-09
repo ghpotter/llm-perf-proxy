@@ -187,7 +187,9 @@ async def metrics_summary():
         AVG(CASE WHEN total_duration IS NOT NULL
                  THEN total_duration / 1e6 END)                           AS avg_total_ms,
         AVG(CASE WHEN prompt_eval_duration IS NOT NULL
-                 THEN prompt_eval_duration / 1e6 END)                     AS avg_prompt_ms
+                 THEN prompt_eval_duration / 1e6 END)                     AS avg_prompt_ms,
+        SUM(estimated_cost_usd)                                           AS total_cost_usd,
+        AVG(estimated_cost_usd)                                           AS avg_cost_usd
     """
     _WHERE = "WHERE eval_count > 0 AND COALESCE(eval_duration, wall_duration_ns) > 0"
 
@@ -207,7 +209,13 @@ async def metrics_summary():
     }
 
     def _round_row(row) -> dict:
-        return {k: round(v, 2) if isinstance(v, float) else v for k, v in dict(row).items()}
+        result = {}
+        for k, v in dict(row).items():
+            if isinstance(v, float):
+                result[k] = round(v, 6) if k.endswith("_usd") else round(v, 2)
+            else:
+                result[k] = v
+        return result
 
     async with db.conn.execute(f"SELECT {_METRICS_COLS} FROM requests {_WHERE}") as cur:
         global_row = await cur.fetchone()

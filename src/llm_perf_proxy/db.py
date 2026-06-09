@@ -68,7 +68,8 @@ async def _migrate(c: aiosqlite.Connection) -> None:
             prompt_eval_count    INTEGER,
             prompt_eval_duration INTEGER,
             eval_count           INTEGER,
-            eval_duration        INTEGER
+            eval_duration        INTEGER,
+            estimated_cost_usd   REAL
         )
     """)
 
@@ -76,6 +77,7 @@ async def _migrate(c: aiosqlite.Connection) -> None:
     for col, typedef in [
         ("backend", "TEXT NOT NULL DEFAULT 'ollama'"),
         ("ttft_ns", "INTEGER"),
+        ("estimated_cost_usd", "REAL"),
     ]:
         try:
             await c.execute(f"ALTER TABLE requests ADD COLUMN {col} {typedef}")
@@ -105,8 +107,9 @@ async def insert(record: MetricsRecord) -> None:
             wall_duration_ns, ttft_ns,
             total_duration, load_duration,
             prompt_eval_count, prompt_eval_duration,
-            eval_count, eval_duration
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            eval_count, eval_duration,
+            estimated_cost_usd
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.get("timestamp"),
@@ -121,6 +124,7 @@ async def insert(record: MetricsRecord) -> None:
             record.get("prompt_eval_duration"),
             record.get("eval_count"),
             record.get("eval_duration"),
+            record.get("estimated_cost_usd"),
         ),
     )
     await conn.commit()
