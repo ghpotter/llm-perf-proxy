@@ -148,3 +148,20 @@ async def test_generate_bad_json_returns_400(client):
         headers={"Content-Type": "application/json"},
     )
     assert resp.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_generate_non_ollama_backend_returns_501(test_app, monkeypatch):
+    mock_backend = MagicMock()
+    mock_backend.name = "openai"
+    monkeypatch.setattr(main, "active_backend", mock_backend)
+
+    async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:
+        resp = await ac.post(
+            "/api/generate",
+            json={"model": "gpt-4o", "prompt": "Why is the sky blue?"},
+        )
+
+    assert resp.status_code == 501
+    assert "openai" in resp.json()["detail"]
+    assert "/api/chat" in resp.json()["detail"]

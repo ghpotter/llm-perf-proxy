@@ -136,9 +136,18 @@ async def proxy_chat(request: Request):
 async def proxy_generate(request: Request):
     """
     Streaming proxy for Ollama's raw completion endpoint.
-    OpenAI and Anthropic backends route this to their chat endpoint since
-    neither exposes a separate raw-completion stream.
+    Returns 501 for non-Ollama backends — they have no equivalent raw-completion
+    API and silently forwarding an Ollama-style body would produce a confusing
+    upstream error. Use /api/chat instead.
     """
+    if not isinstance(active_backend, OllamaBackend):
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f"/api/generate is not supported for the '{active_backend.name}' backend. "
+                "Use /api/chat instead."
+            ),
+        )
     try:
         body = await request.json()
     except Exception:
