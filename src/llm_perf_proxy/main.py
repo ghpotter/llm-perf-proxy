@@ -12,11 +12,14 @@ handlers only. Business logic lives in the modules it imports.
 
 import asyncio
 import logging
+import re
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 import llm_perf_proxy.db as db
 import llm_perf_proxy.worker as worker
@@ -27,6 +30,26 @@ log = logging.getLogger("llm-proxy")
 
 # Module-level reference set during lifespan so routes can call it.
 active_backend: Backend | None = None
+
+# ── Timeseries helpers ────────────────────────────────────────────────────────
+
+_RELATIVE_RE = re.compile(r"^(\d+)([mhd])$", re.IGNORECASE)
+
+_WINDOW_FMT: dict[str, str] = {
+    "minute": "%Y-%m-%dT%H:%M:00",
+    "hour": "%Y-%m-%dT%H:00:00",
+    "day": "%Y-%m-%d",
+}
+
+
+def _parse_since(s: str) -> str:
+    """Convert a relative shorthand (e.g. '24h', '7d') to an ISO-8601 string."""
+    m = _RELATIVE_RE.match(s)
+    if m:
+        n, unit = int(m.group(1)), m.group(2).lower()
+        delta = {"m": timedelta(minutes=n), "h": timedelta(hours=n), "d": timedelta(days=n)}[unit]
+        return (datetime.now(UTC) - delta).isoformat()
+    return s
 
 
 # ---------------------------------------------------------------------------
@@ -84,6 +107,15 @@ async def _proxy_stream(endpoint: str, body: dict, request_headers: dict):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+_DASHBOARD = Path(__file__).parent / "dashboard.html"
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard():
+    """Live performance dashboard — polls /metrics/timeseries every 5 s."""
+    return _DASHBOARD.read_text(encoding="utf-8")
 
 
 @app.get("/health")
@@ -243,3 +275,76 @@ async def metrics_summary():
     result["by_model_and_endpoint"] = cross_tab
     result["queue_depth"] = worker.queue.qsize()
     return result
+
+
+@app.get("/metrics/timeseries")
+async def metrics_timeseries(
+    since: str = Query("24h", description="ISO-8601 timestamp or relative shorthand (1h, 24h, 7d)"),
+    window: str = Query("hour", description="Bucket size: minute | hour | day"),
+    backend: str | None = Query(None, description="Filter to a specific backend"),
+    model: str | None = Query(None, description="Filter to a specific model"),
+):
+    """
+    Time-bucketed performance stats. Returns one row per bucket within the
+    requested window, ordered oldest-first (suitable for chart rendering).
+
+    Bucket timestamps follow strftime output:
+        minute → "2026-06-09T14:35:00"
+        hour   → "2026-06-09T14:00:00"
+        day    → "2026-06-09"
+    """
+    if window not in _WINDOW_FMT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid window '{window}'. Use: {', '.join(_WINDOW_FMT)}.",
+        )
+
+    fmt = _WINDOW_FMT[window]
+    since_ts = _parse_since(since)
+
+    conditions = [
+        "eval_count > 0",
+        "COALESCE(eval_duration, wall_duration_ns) > 0",
+        "timestamp >= ?",
+    ]
+    params: list = [since_ts]
+
+    if backend:
+        conditions.append("backend = ?")
+        params.append(backend)
+    if model:
+        conditions.append("model = ?")
+        params.append(model)
+
+    where_clause = " AND ".join(conditions)
+
+    # fmt comes only from _WINDOW_FMT — not user input — so f-string is safe.
+    sql = f"""
+        SELECT
+            strftime('{fmt}', timestamp)                                            AS ts,
+            COUNT(*)                                                                AS requests,
+            SUM(eval_count)                                                         AS total_tokens,
+            AVG(CAST(eval_count AS REAL)
+                / (COALESCE(eval_duration, wall_duration_ns) / 1e9))                AS avg_tps,
+            MAX(CAST(eval_count AS REAL)
+                / (COALESCE(eval_duration, wall_duration_ns) / 1e9))                AS peak_tps,
+            AVG(wall_duration_ns / 1e6)                                             AS avg_wall_ms,
+            AVG(CASE WHEN ttft_ns IS NOT NULL THEN ttft_ns / 1e6 END)               AS avg_ttft_ms
+        FROM requests
+        WHERE {where_clause}
+        GROUP BY ts
+        ORDER BY ts ASC
+    """
+
+    async with db.conn.execute(sql, params) as cur:
+        rows = await cur.fetchall()
+
+    def _round_bucket(row) -> dict:
+        return {k: round(v, 2) if isinstance(v, float) else v for k, v in dict(row).items()}
+
+    return {
+        "window": window,
+        "since": since_ts,
+        "filters": {"backend": backend, "model": model},
+        "buckets": [_round_bucket(r) for r in rows],
+    }

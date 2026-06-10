@@ -30,6 +30,9 @@ llm-perf-proxy = "llm_perf_proxy.main:app"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"llm_perf_proxy" = ["*.html"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
