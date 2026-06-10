@@ -15,6 +15,8 @@ client  →  llm-perf-proxy :8000  →  Ollama / OpenAI / Anthropic
 - **Three backends** — Ollama (local), OpenAI-compatible APIs, and Anthropic
 - **SQLite persistence** — metrics survive restarts; schema migration runs automatically on startup
 - **REST summary endpoint** — aggregated stats sliced by backend, endpoint, model, and cross-tabbed combinations
+- **Time-series endpoint** — `GET /metrics/timeseries` with configurable bucket granularity and flexible `since` filtering
+- **Live dashboard** — self-contained Chart.js page at `GET /`; polls the time-series endpoint every 5 s with light/dark mode toggle and colorblind-safe palette
 - **CI/CD** — GitHub Actions pipeline with lint, type-check, tests, and Docker image push to GHCR
 
 ---
@@ -80,6 +82,18 @@ All configuration is via environment variables. Copy `.env.example` to `.env` an
 ---
 
 ## API
+
+### `GET /`
+
+Live performance dashboard. Open in a browser — no setup required.
+
+- Polls `/metrics/timeseries` every 5 seconds
+- Dual-axis chart: avg TPS (line) and request count (bar) per time bucket
+- Window and time-range selectors (`minute / hour / day`, `1 h – 30 d`)
+- Light / dark mode toggle (persisted in `localStorage`, respects OS preference on first visit)
+- Colors from the Okabe-Ito palette — distinguishable across all common types of color blindness
+
+---
 
 ### `POST /api/chat`
 
@@ -173,6 +187,62 @@ SQL-aggregated performance stats across all captured requests. Returns five slic
 
 ---
 
+### `GET /metrics/timeseries`
+
+Time-bucketed stats ordered oldest-first, suitable for chart rendering.
+
+**Query parameters**
+
+| Parameter | Default | Description |
+|---|---|---|
+| `since` | `24h` | Start of the window — ISO-8601 timestamp or relative shorthand (`1h`, `24h`, `7d`, `30d`) |
+| `window` | `hour` | Bucket granularity: `minute`, `hour`, or `day` |
+| `backend` | — | Optional: filter to a specific backend |
+| `model` | — | Optional: filter to a specific model |
+
+```bash
+# Last 24 hours, hourly buckets (defaults)
+curl "http://localhost:8000/metrics/timeseries"
+
+# Last 7 days, daily buckets, Ollama only
+curl "http://localhost:8000/metrics/timeseries?since=7d&window=day&backend=ollama"
+
+# Since a specific timestamp, minute-level granularity
+curl "http://localhost:8000/metrics/timeseries?since=2026-06-09T10:00:00Z&window=minute"
+```
+
+```json
+{
+  "window": "hour",
+  "since": "2026-06-09T00:00:00+00:00",
+  "filters": { "backend": null, "model": null },
+  "buckets": [
+    {
+      "ts": "2026-06-09T10:00:00",
+      "requests": 12,
+      "total_tokens": 1430,
+      "avg_tps": 27.3,
+      "peak_tps": 31.8,
+      "avg_wall_ms": 4850.2,
+      "avg_ttft_ms": null
+    },
+    {
+      "ts": "2026-06-09T11:00:00",
+      "requests": 8,
+      "total_tokens": 920,
+      "avg_tps": 29.1,
+      "peak_tps": 33.2,
+      "avg_wall_ms": 4210.5,
+      "avg_ttft_ms": 412.3
+    }
+  ]
+}
+```
+
+Bucket timestamps use strftime format: `hour` → `"2026-06-09T11:00:00"`, `day` → `"2026-06-09"`.
+
+---
+
 ## Project structure
 
 ```
@@ -183,6 +253,7 @@ llm-perf-proxy/
 │       ├── config.py        # All environment variables
 │       ├── db.py            # SQLite connection, schema migration, insert
 │       ├── worker.py        # Async metrics queue and background drain task
+│       ├── dashboard.html   # Self-contained live metrics dashboard (served at GET /)
 │       └── backends/
 │           ├── base.py      # Backend ABC + MetricsRecord
 │           ├── ollama.py
