@@ -50,6 +50,18 @@ async def client(test_app):
         yield ac
 
 
+# ── / (dashboard) ────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_dashboard_returns_html(client):
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "chart" in resp.text.lower()
+    assert "/metrics/timeseries" in resp.text
+
+
 # ── /health ───────────────────────────────────────────────────────────────────
 
 

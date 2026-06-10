@@ -15,10 +15,11 @@ import logging
 import re
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 
 import llm_perf_proxy.db as db
 import llm_perf_proxy.worker as worker
@@ -106,6 +107,15 @@ async def _proxy_stream(endpoint: str, body: dict, request_headers: dict):
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+
+
+_DASHBOARD = Path(__file__).parent / "dashboard.html"
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def dashboard():
+    """Live performance dashboard — polls /metrics/timeseries every 5 s."""
+    return _DASHBOARD.read_text(encoding="utf-8")
 
 
 @app.get("/health")
