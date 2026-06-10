@@ -1,0 +1,19 @@
+{
+  "_comment": "Copy this file to prices.json to override or extend built-in model prices.",
+  "_format": "Keys are model-name prefixes; longest match wins. Values are [input_$/1M_tokens, output_$/1M_tokens].",
+
+  "claude-opus-4-8":   [5.00,  25.00],
+  "claude-opus-4-7":   [5.00,  25.00],
+  "claude-opus-4-6":   [5.00,  25.00],
+  "claude-sonnet-4-6": [3.00,  15.00],
+  "claude-haiku-4-5":  [1.00,   5.00],
+
+  "gpt-4o-mini":   [0.15,  0.60],
+  "gpt-4o":        [2.50, 10.00],
+  "gpt-4-turbo":  [10.00, 30.00],
+  "o1-mini":       [3.00, 12.00],
+  "o1":           [15.00, 60.00],
+  "o3-mini":       [1.10,  4.40],
+  "o3":           [10.00, 40.00],
+  "o4-mini":       [1.10,  4.40]
+}

@@ -23,6 +23,7 @@ from fastapi.responses import HTMLResponse, StreamingResponse
 
 import llm_perf_proxy.db as db
 import llm_perf_proxy.worker as worker
+from llm_perf_proxy import config
 from llm_perf_proxy.backends import MetricsRecord, OllamaBackend, build_backend
 from llm_perf_proxy.backends.base import Backend
 
@@ -59,6 +60,8 @@ def _parse_since(s: str) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    config.validate()
+
     global active_backend
     active_backend = build_backend()
     log.info("Active backend: %s", active_backend.name)
