@@ -16,6 +16,7 @@ from llm_perf_proxy.backends.anthropic import AnthropicBackend
 from llm_perf_proxy.backends.base import MetricsRecord
 from llm_perf_proxy.backends.ollama import OllamaBackend
 from llm_perf_proxy.backends.openai import OpenAIBackend
+from llm_perf_proxy.config import compute_cost
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -264,3 +265,31 @@ async def test_anthropic_ttft_on_first_text_delta():
 
     record = next(i for i in items if isinstance(i, MetricsRecord))
     assert record["ttft_ns"] < record["wall_duration_ns"]
+
+
+# ── compute_cost ──────────────────────────────────────────────────────────────
+
+
+def test_compute_cost_anthropic_sonnet():
+    # $3.00 input + $15.00 output per 1M tokens
+    cost = compute_cost("claude-sonnet-4-6", 1_000_000, 1_000_000)
+    assert cost is not None
+    assert abs(cost - 18.0) < 1e-9
+
+
+def test_compute_cost_openai_mini_prefix_wins_over_gpt4o():
+    # "gpt-4o-mini-2024-07-18" must match "gpt-4o-mini" ($0.15), not "gpt-4o" ($2.50)
+    cost = compute_cost("gpt-4o-mini-2024-07-18", 1_000_000, 0)
+    assert cost is not None
+    assert abs(cost - 0.15) < 1e-9
+
+
+def test_compute_cost_unknown_model_returns_none():
+    assert compute_cost("llama3.2", 100, 50) is None
+    assert compute_cost("phi3", 500, 200) is None
+
+
+def test_compute_cost_missing_tokens_returns_none():
+    assert compute_cost("claude-sonnet-4-6", None, 100) is None
+    assert compute_cost("claude-sonnet-4-6", 100, None) is None
+    assert compute_cost(None, 100, 100) is None

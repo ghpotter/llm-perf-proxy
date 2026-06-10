@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Perf Proxy</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+  <style>
+    /* ── Theme tokens ─────────────────────────────────────────────────────── */
+    :root {
+      --bg:          #0d1117;
+      --surface:     #161b22;
+      --border:      #21262d;
+      --border-ctrl: #30363d;
+      --text:        #c9d1d9;
+      --text-bright: #e6edf3;
+      --text-muted:  #8b949e;
+      --text-dim:    #484f58;
+      --text-dimmer: #6e7681;
+      --accent:      #58a6ff;
+      --badge-bg:    #1c2128;
+    }
+    :root[data-theme="light"] {
+      --bg:          #f6f8fa;
+      --surface:     #ffffff;
+      --border:      #d0d7de;
+      --border-ctrl: #d0d7de;
+      --text:        #1f2328;
+      --text-bright: #1f2328;
+      --text-muted:  #57606a;
+      --text-dim:    #6e7781;
+      --text-dimmer: #6e7781;
+      --accent:      #0969da;
+      --badge-bg:    #eaeef2;
+    }
+
+    /* ── Base ─────────────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      padding: 1.5rem 2rem;
+      transition: background 0.2s, color 0.2s;
+    }
+
+    /* ── Header ───────────────────────────────────────────────────────────── */
+    header {
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 1.5rem;
+    }
+    h1 { margin: 0; font-size: 1.15rem; color: var(--accent); font-weight: 600; }
+    .badge {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      background: var(--badge-bg);
+      border: 1px solid var(--border-ctrl);
+      border-radius: 12px;
+      padding: 2px 10px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+
+    /* ── Theme toggle ─────────────────────────────────────────────────────── */
+    .theme-toggle {
+      display: flex;
+      align-items: center;
+      gap: 0.45rem;
+      margin-left: auto;
+    }
+    .toggle-icon {
+      font-size: 0.95rem;
+      color: var(--text-dim);
+      transition: color 0.2s;
+      user-select: none;
+      line-height: 1;
+    }
+    .toggle-icon.active { color: var(--accent); }
+
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 42px;
+      height: 24px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .switch input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border: 1px solid var(--border-ctrl);
+      border-radius: 24px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .slider::before {
+      content: '';
+      position: absolute;
+      height: 16px;
+      width: 16px;
+      left: 3px;
+      top: 3px;
+      background: var(--text-muted);
+      border-radius: 50%;
+      transition: transform 0.2s, background 0.2s;
+    }
+    .switch input:checked + .slider {
+      background: var(--accent);
+      border-color: var(--accent);
+    }
+    .switch input:checked + .slider::before {
+      transform: translateX(18px);
+      background: #fff;
+    }
+
+    /* ── Controls ─────────────────────────────────────────────────────────── */
+    .controls {
+      display: flex;
+      gap: 0.75rem;
+      margin-bottom: 1.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .controls label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+    }
+    .controls select {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border-ctrl);
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 0.85rem;
+      cursor: pointer;
+      transition: background 0.2s, color 0.2s, border-color 0.2s;
+    }
+    #refresh-ts { margin-left: auto; font-size: 0.75rem; color: var(--text-dim); }
+
+    /* ── Stats cards ──────────────────────────────────────────────────────── */
+    .stats { display: flex; gap: 1rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.85rem 1.25rem;
+      flex: 1;
+      min-width: 110px;
+      transition: background 0.2s, border-color 0.2s;
+    }
+    .card .label {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .card .value {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--text-bright);
+      margin-top: 0.2rem;
+    }
+    .card .unit { font-size: 0.7rem; color: var(--text-dim); }
+
+    /* ── Chart ────────────────────────────────────────────────────────────── */
+    .chart-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1rem 1.25rem;
+      transition: background 0.2s, border-color 0.2s;
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>LLM Performance Proxy</h1>
+  <span class="badge" id="backend-badge">—</span>
+
+  <div class="theme-toggle" title="Toggle color scheme">
+    <span class="toggle-icon active" id="icon-moon">☾</span>
+    <label class="switch">
+      <input type="checkbox" id="theme-cb">
+      <span class="slider"></span>
+    </label>
+    <span class="toggle-icon" id="icon-sun">☀</span>
+  </div>
+</header>
+
+<div class="controls">
+  <label>
+    Window
+    <select id="sel-window">
+      <option value="minute">Minute</option>
+      <option value="hour" selected>Hour</option>
+      <option value="day">Day</option>
+    </select>
+  </label>
+  <label>
+    Since
+    <select id="sel-since">
+      <option value="1h">Last 1 h</option>
+      <option value="24h" selected>Last 24 h</option>
+      <option value="7d">Last 7 d</option>
+      <option value="30d">Last 30 d</option>
+    </select>
+  </label>
+  <span id="refresh-ts"></span>
+</div>
+
+<div class="stats">
+  <div class="card">
+    <div class="label">Requests</div>
+    <div class="value" id="s-req">—</div>
+  </div>
+  <div class="card">
+    <div class="label">Avg TPS</div>
+    <div class="value" id="s-tps">—</div>
+    <div class="unit">tokens / s</div>
+  </div>
+  <div class="card">
+    <div class="label">Peak TPS</div>
+    <div class="value" id="s-peak">—</div>
+    <div class="unit">tokens / s</div>
+  </div>
+  <div class="card">
+    <div class="label">Avg Latency</div>
+    <div class="value" id="s-wall">—</div>
+    <div class="unit">ms wall</div>
+  </div>
+  <div class="card">
+    <div class="label">Avg TTFT</div>
+    <div class="value" id="s-ttft">—</div>
+    <div class="unit">ms</div>
+  </div>
+</div>
+
+<div class="chart-wrap">
+  <canvas id="chart"></canvas>
+</div>
+
+<script>
+// ── Theme palette for Chart.js (CSS variables can't be read by the canvas) ──
+// Colors are from the Okabe-Ito palette — distinguishable across all common
+// types of color blindness (deuteranopia, protanopia, tritanopia).
+const THEMES = {
+  dark: {
+    tps: '#56B4E9', req: '#E69F00',   // sky blue + orange
+    grid: '#21262d', xTick: '#6e7681', legend: '#8b949e',
+    ttBg: '#1c2128', ttBorder: '#30363d', ttTitle: '#c9d1d9', ttBody: '#8b949e',
+  },
+  light: {
+    tps: '#0072B2', req: '#D55E00',   // dark blue + vermillion
+    grid: '#d0d7de', xTick: '#6e7781', legend: '#57606a',
+    ttBg: '#ffffff', ttBorder: '#d0d7de', ttTitle: '#1f2328', ttBody: '#57606a',
+  },
+};
+
+// ── Chart (initialised with dark defaults; applyTheme may immediately update) ─
+const chart = new Chart(document.getElementById('chart').getContext('2d'), {
+  data: {
+    labels: [],
+    datasets: [
+      {
+        type: 'line',
+        label: 'Avg TPS',
+        data: [],
+        yAxisID: 'yLeft',
+        borderColor: THEMES.dark.tps,
+        backgroundColor: THEMES.dark.tps + '33',
+        fill: true,
+        tension: 0.3,
+        pointRadius: 3,
+        spanGaps: true,
+      },
+      {
+        type: 'bar',
+        label: 'Requests',
+        data: [],
+        yAxisID: 'yRight',
+        backgroundColor: THEMES.dark.req + '66',
+        borderColor: THEMES.dark.req,
+        borderWidth: 1,
+      },
+    ],
+  },
+  options: {
+    responsive: true,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { labels: { color: THEMES.dark.legend, boxWidth: 12 } },
+      tooltip: {
+        backgroundColor: THEMES.dark.ttBg,
+        borderColor: THEMES.dark.ttBorder,
+        borderWidth: 1,
+        titleColor: THEMES.dark.ttTitle,
+        bodyColor: THEMES.dark.ttBody,
+      },
+    },
+    scales: {
+      x: {
+        ticks: { color: THEMES.dark.xTick, maxRotation: 0, autoSkip: true, maxTicksLimit: 14 },
+        grid:  { color: THEMES.dark.grid },
+      },
+      yLeft: {
+        type: 'linear', position: 'left',
+        title: { display: true, text: 'Avg TPS', color: THEMES.dark.tps, font: { size: 11 } },
+        ticks: { color: THEMES.dark.tps },
+        grid:  { color: THEMES.dark.grid },
+        min: 0,
+      },
+      yRight: {
+        type: 'linear', position: 'right',
+        title: { display: true, text: 'Requests', color: THEMES.dark.req, font: { size: 11 } },
+        ticks: { color: THEMES.dark.req, precision: 0 },
+        grid:  { drawOnChartArea: false },
+        min: 0,
+      },
+    },
+  },
+});
+
+// ── Theme switching ───────────────────────────────────────────────────────────
+function applyTheme(name) {
+  const t = THEMES[name];
+  const isDark = name === 'dark';
+
+  document.documentElement.dataset.theme = name;
+
+  // Chart dataset colours
+  chart.data.datasets[0].borderColor     = t.tps;
+  chart.data.datasets[0].backgroundColor = t.tps + '33';
+  chart.data.datasets[1].borderColor     = t.req;
+  chart.data.datasets[1].backgroundColor = t.req + '66';
+
+  // Chart option colours
+  const s = chart.options.scales;
+  s.x.ticks.color      = t.xTick;
+  s.x.grid.color       = t.grid;
+  s.yLeft.ticks.color  = t.tps;
+  s.yLeft.grid.color   = t.grid;
+  s.yLeft.title.color  = t.tps;
+  s.yRight.ticks.color = t.req;
+  s.yRight.title.color = t.req;
+  chart.options.plugins.legend.labels.color       = t.legend;
+  chart.options.plugins.tooltip.backgroundColor   = t.ttBg;
+  chart.options.plugins.tooltip.borderColor       = t.ttBorder;
+  chart.options.plugins.tooltip.titleColor        = t.ttTitle;
+  chart.options.plugins.tooltip.bodyColor         = t.ttBody;
+  chart.update('none');
+
+  // Toggle UI state
+  document.getElementById('theme-cb').checked = !isDark;
+  document.getElementById('icon-moon').classList.toggle('active', isDark);
+  document.getElementById('icon-sun').classList.toggle('active', !isDark);
+
+  localStorage.setItem('theme', name);
+}
+
+document.getElementById('theme-cb').addEventListener('change', e => {
+  applyTheme(e.target.checked ? 'light' : 'dark');
+});
+
+// Restore saved preference, falling back to OS preference
+const saved = localStorage.getItem('theme') ||
+  (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+applyTheme(saved);
+
+// ── Data helpers ──────────────────────────────────────────────────────────────
+function fmtTs(ts, win) {
+  return win === 'day' ? ts.slice(5) : ts.slice(11, 16);
+}
+
+function safeAvg(arr) {
+  const vals = arr.filter(v => v != null);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+}
+
+// ── Data refresh ──────────────────────────────────────────────────────────────
+async function refresh() {
+  const win   = document.getElementById('sel-window').value;
+  const since = document.getElementById('sel-since').value;
+
+  try {
+    const [tsRes, hRes] = await Promise.all([
+      fetch(`/metrics/timeseries?window=${win}&since=${since}`),
+      fetch('/health'),
+    ]);
+
+    if (tsRes.ok) {
+      const { buckets } = await tsRes.json();
+
+      chart.data.labels           = buckets.map(b => fmtTs(b.ts, win));
+      chart.data.datasets[0].data = buckets.map(b => b.avg_tps  ?? null);
+      chart.data.datasets[1].data = buckets.map(b => b.requests);
+      chart.update('none');
+
+      const totalReq = buckets.reduce((s, b) => s + b.requests, 0);
+      const avgTps   = safeAvg(buckets.map(b => b.avg_tps));
+      const peakTps  = buckets.length ? Math.max(...buckets.map(b => b.peak_tps ?? 0)) : null;
+      const avgWall  = safeAvg(buckets.map(b => b.avg_wall_ms));
+      const avgTtft  = safeAvg(buckets.map(b => b.avg_ttft_ms));
+
+      document.getElementById('s-req').textContent  = totalReq || '—';
+      document.getElementById('s-tps').textContent  = avgTps  != null ? avgTps.toFixed(1)  : '—';
+      document.getElementById('s-peak').textContent = peakTps != null ? peakTps.toFixed(1) : '—';
+      document.getElementById('s-wall').textContent = avgWall != null ? Math.round(avgWall) : '—';
+      document.getElementById('s-ttft').textContent = avgTtft != null ? Math.round(avgTtft) : '—';
+    }
+
+    if (hRes.ok) {
+      const h = await hRes.json();
+      const b = h.backend;
+      document.getElementById('backend-badge').textContent =
+        b.reachable !== undefined ? `${b.name} ${b.reachable ? '●' : '○'}` : b.name;
+    }
+
+    document.getElementById('refresh-ts').textContent =
+      'Updated ' + new Date().toLocaleTimeString();
+  } catch {
+    document.getElementById('refresh-ts').textContent = 'fetch error';
+  }
+}
+
+document.getElementById('sel-window').addEventListener('change', refresh);
+document.getElementById('sel-since').addEventListener('change', refresh);
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+
+</body>
+</html>

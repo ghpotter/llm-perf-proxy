@@ -13,6 +13,7 @@ client  →  llm-perf-proxy :8000  →  Ollama / OpenAI / Anthropic
 - **Zero-overhead streaming** — raw response bytes are forwarded to the client before any parsing occurs
 - **Async metrics capture** — a background worker drains a queue into SQLite, completely decoupled from the request path
 - **Three backends** — Ollama (local), OpenAI-compatible APIs, and Anthropic
+- **Cost estimation** — per-request USD cost computed from token counts against a built-in model price table; shown in every summary slice
 - **SQLite persistence** — metrics survive restarts; schema migration runs automatically on startup
 - **REST summary endpoint** — aggregated stats sliced by backend, endpoint, model, and cross-tabbed combinations
 - **Time-series endpoint** — `GET /metrics/timeseries` with configurable bucket granularity and flexible `since` filtering
@@ -153,12 +154,14 @@ SQL-aggregated performance stats across all captured requests. Returns five slic
     "avg_wall_ms": 4820.5,
     "avg_ttft_ms": null,
     "avg_total_ms": 4750.1,
-    "avg_prompt_ms": 298.3
+    "avg_prompt_ms": 298.3,
+    "total_cost_usd": 0.012840,
+    "avg_cost_usd": 0.000306
   },
   "by_backend": {
-    "ollama": { "requests": 30, "avg_tps": 24.1, "avg_ttft_ms": null },
-    "openai": { "requests": 8,  "avg_tps": 41.7, "avg_ttft_ms": 395.2 },
-    "anthropic": { "requests": 4, "avg_tps": 31.9, "avg_ttft_ms": 620.1 }
+    "ollama":    { "requests": 30, "avg_tps": 24.1, "avg_ttft_ms": null,  "total_cost_usd": null,     "avg_cost_usd": null },
+    "openai":    { "requests": 8,  "avg_tps": 41.7, "avg_ttft_ms": 395.2, "total_cost_usd": 0.009600, "avg_cost_usd": 0.001200 },
+    "anthropic": { "requests": 4,  "avg_tps": 31.9, "avg_ttft_ms": 620.1, "total_cost_usd": 0.003240, "avg_cost_usd": 0.000810 }
   },
   "by_endpoint": { "chat": {...}, "generate": {...} },
   "by_model": {
@@ -184,6 +187,36 @@ SQL-aggregated performance stats across all captured requests. Returns five slic
 | `avg_ttft_ms` | ms | Time to first token. Measured for OpenAI and Anthropic; `null` for Ollama (use `avg_prompt_ms` instead) |
 | `avg_total_ms` | ms | Ollama's internal total duration. `null` for remote backends |
 | `avg_prompt_ms` | ms | Ollama's prompt evaluation time (proxy for TTFT). `null` for remote backends |
+| `total_cost_usd` | USD | Sum of estimated request costs. `null` for models not in the price table (e.g. local Ollama models) |
+| `avg_cost_usd` | USD | Average estimated cost per request. `null` when no priced models in the slice |
+
+---
+
+## Cost tracking
+
+For each request the worker computes `estimated_cost_usd` from token counts and a price table in `config.py`:
+
+```
+cost = (prompt_tokens × input_rate + completion_tokens × output_rate) / 1_000_000
+```
+
+**Built-in model prices** (USD per 1 M tokens, input / output):
+
+| Provider  | Model | Input | Output |
+|-----------|-------|------:|-------:|
+| Anthropic | claude-opus-4-8 / 4-7 / 4-6 | $5.00 | $25.00 |
+| Anthropic | claude-sonnet-4-6 | $3.00 | $15.00 |
+| Anthropic | claude-haiku-4-5 | $1.00 | $5.00 |
+| OpenAI | gpt-4o | $2.50 | $10.00 |
+| OpenAI | gpt-4o-mini | $0.15 | $0.60 |
+| OpenAI | gpt-4-turbo | $10.00 | $30.00 |
+| OpenAI | o1 | $15.00 | $60.00 |
+| OpenAI | o1-mini / o3-mini / o4-mini | $1.10–$3.00 | $4.40–$12.00 |
+| OpenAI | o3 | $10.00 | $40.00 |
+
+Model name matching uses the longest prefix, so `gpt-4o-mini-2024-07-18` correctly resolves to the `gpt-4o-mini` price rather than `gpt-4o`. Local Ollama models are not in the table and store `NULL` — they are excluded from cost aggregations rather than counted as zero.
+
+To add a model or update a price, edit `_PRICE_TABLE` in `src/llm_perf_proxy/config.py`.
 
 ---
 
